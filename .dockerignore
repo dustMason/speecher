@@ -1,0 +1,8 @@
+# flyctl launch added from .idea/.gitignore
+# Default ignored files
+.idea/shelf
+.idea/workspace.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/speecher.iml
+fly.toml
