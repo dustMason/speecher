@@ -25,13 +25,17 @@ type OpenAIRequest struct {
 	Voice string `json:"voice"`
 }
 
+// todo write a goroutine that crawls the files directory and deletes files older than 1 hour. it should run hourly
+
+const commandName = "speak"
+
 var (
 	s *discordgo.Session
 
 	commands = []*discordgo.ApplicationCommand{
 		{
-			Name:        "stest1",
-			Description: "Command for demonstrating options",
+			Name:        commandName,
+			Description: "Grab the contents of a webpage and return an mp3 of the text being read",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
@@ -40,15 +44,23 @@ var (
 					Required:    true,
 				},
 			},
+			// todo add option for voice
 		},
 	}
 
 	commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
-		"stest1": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		commandName: func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			options := i.ApplicationCommandData().Options
 			optionMap := make(map[string]*discordgo.ApplicationCommandInteractionDataOption, len(options))
 			for _, opt := range options {
 				optionMap[opt.Name] = opt
+			}
+
+			doError := func(e error) {
+				fmt.Printf("error: %+v\n", e)
+				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+					Content: "Something went wrong: " + e.Error(),
+				})
 			}
 
 			if option, ok := optionMap["url"]; ok {
@@ -60,36 +72,67 @@ var (
 					},
 				})
 				if err != nil {
-					s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-						Content: "Something went wrong",
-					})
+					doError(err)
 					return
 				}
 				extracted := callExtractorAPI(option.StringValue())
-				fmt.Println(extracted.Text)
+				preview := extracted.Text
+				if len(preview) > 100 {
+					preview = preview[:100]
+				}
+				fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
 
-				c := "Calling OpenAI TTS API..."
-				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
+				randBytes := make([]byte, 10)
+				_, _ = rand.Read(randBytes)
+				pathPrefix := os.Getenv("FILES_PATH")
+				filename := pathPrefix + "speech_" + hex.EncodeToString(randBytes) + ".mp3"
+
+				const maxLen = 4095 // TTS API can do max 4096 characters
+				file, err := os.Create(filename)
 				if err != nil {
-					s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-						Content: "Something went wrong",
-					})
+					doError(err)
 					return
 				}
+				defer file.Close()
+				n := 1
+				for len(extracted.Text) > 0 {
+					chunkLen := len(extracted.Text)
+					if chunkLen > maxLen {
+						chunkLen = maxLen
+						// Find the last period in the current chunk
+						for i := chunkLen; i >= 0; i-- {
+							if extracted.Text[i] == '.' {
+								chunkLen = i + 1
+								break
+							}
+						}
+					}
 
-				if len(extracted.Text) > 4095 {
-					extracted.Text = extracted.Text[:4095]
+					chunk := extracted.Text[:chunkLen]
+					extracted.Text = extracted.Text[chunkLen:]
+
+					c := fmt.Sprintf("Calling OpenAI TTS API go get audio for '%s' (chunk %d)", extracted.Title, n)
+					_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
+					if err != nil {
+						doError(err)
+						return
+					}
+
+					body := callOpenAI(chunk)
+					_, err = io.Copy(file, body)
+					if err != nil {
+						doError(err)
+						return
+					}
+					_ = body.Close()
+					n++
 				}
-				callOpenAI(extracted.Text)
 
-				// todo upload to s3 and return the URL here
-
-				c = "Done!"
+				// todo c should be a link to download the file, which means we also need to operate a webserver...
+				c := "Done!"
 				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
 				if err != nil {
-					s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-						Content: "Something went wrong",
-					})
+					doError(err)
 					return
 				}
 			}
@@ -122,7 +165,6 @@ func main() {
 
 	guildID := os.Getenv("GUILD_ID")
 
-	log.Println("Adding commands...")
 	registeredCommands := make([]*discordgo.ApplicationCommand, len(commands))
 	for i, v := range commands {
 		cmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, v)
@@ -140,16 +182,7 @@ func main() {
 	<-stop
 }
 
-func callExtractorAPI(url string) ExtractorResponse {
-	apiKey := os.Getenv("EXTRACTOR_API_KEY")
-	resp, _ := http.Get("https://extractorapi.com/api/v1/extractor/?apikey=" + apiKey + "&url=" + url)
-	body, _ := io.ReadAll(resp.Body)
-	var extractorResponse ExtractorResponse
-	json.Unmarshal(body, &extractorResponse)
-	return extractorResponse
-}
-
-func callOpenAI(text string) (string, error) {
+func callOpenAI(text string) io.ReadCloser {
 	client := &http.Client{}
 	reqBody, _ := json.Marshal(OpenAIRequest{
 		Model: "tts-1",
@@ -160,27 +193,14 @@ func callOpenAI(text string) (string, error) {
 	req.Header.Add("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
 	req.Header.Add("Content-Type", "application/json")
 	resp, _ := client.Do(req)
-	body, _ := io.ReadAll(resp.Body)
-
-	// Generate a random string of 10 bytes and encode it as hexadecimal
-	randBytes := make([]byte, 10)
-	_, _ = rand.Read(randBytes)
-	filename := "speech_" + hex.EncodeToString(randBytes) + ".mp3"
-
-	err := os.WriteFile(filename, body, 0644)
-	if err != nil {
-		return "", err
-	}
-	return filename, nil
+	return resp.Body
 }
 
-//func uploadToS3(filePath string) string {
-//	file, _ := os.Open(filePath)
-//	uploader := s3manager.NewUploader(session.New(&aws.Config{Region: aws.String("us-west-2")}))
-//	result, _ := uploader.Upload(&s3manager.UploadInput{
-//		Bucket: aws.String("<your-bucket-name>"),
-//		Key:    aws.String(filePath),
-//		Body:   file,
-//	})
-//	return result.Location
-//}
+func callExtractorAPI(url string) ExtractorResponse {
+	apiKey := os.Getenv("EXTRACTOR_API_KEY")
+	resp, _ := http.Get("https://extractorapi.com/api/v1/extractor/?apikey=" + apiKey + "&url=" + url)
+	body, _ := io.ReadAll(resp.Body)
+	var extractorResponse ExtractorResponse
+	json.Unmarshal(body, &extractorResponse)
+	return extractorResponse
+}
