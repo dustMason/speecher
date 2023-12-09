@@ -131,13 +131,15 @@ var (
 					doError(err)
 					return
 				}
-				url, uerr := uploadToS3(tempFile)
+				mp3Url, uerr := uploadToS3(tempFile)
 				if uerr != nil {
 					doError(uerr)
 					return
 				}
 
-				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &url})
+				finalMessage := fmt.Sprintf("Here's the audio for '%s' (%s)\n\n%s", extracted.Title, url, mp3Url)
+
+				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &finalMessage})
 				if err != nil {
 					doError(err)
 					return
