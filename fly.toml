@@ -12,6 +12,7 @@ primary_region = "lax"
 
 [env]
   PORT = "8080"
+  AWS_REGION = "us-east-1"
 
 [http_service]
   internal_port = 8080
@@ -25,7 +26,3 @@ primary_region = "lax"
   cpu_kind = "shared"
   cpus = 1
   memory_mb = 1024
-
-[mounts]
-  source="files"
-  destination="/data"

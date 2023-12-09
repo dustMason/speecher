@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/bwmarrin/discordgo"
 	"io"
 	"log"
@@ -12,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 )
 
 type ExtractorResponse struct {
@@ -24,8 +28,6 @@ type OpenAIRequest struct {
 	Input string `json:"input"`
 	Voice string `json:"voice"`
 }
-
-// todo write a goroutine that crawls the files directory and deletes files older than 1 hour. it should run hourly
 
 const commandName = "speak"
 
@@ -82,18 +84,14 @@ var (
 				}
 				fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
 
-				randBytes := make([]byte, 10)
-				_, _ = rand.Read(randBytes)
-				pathPrefix := os.Getenv("FILES_PATH")
-				filename := pathPrefix + "speech_" + hex.EncodeToString(randBytes) + ".mp3"
-
-				const maxLen = 4095 // TTS API can do max 4096 characters
-				file, err := os.Create(filename)
+				tempFile, err := os.CreateTemp("", "speech_*.mp3")
 				if err != nil {
 					doError(err)
 					return
 				}
-				defer file.Close()
+				defer tempFile.Close()
+
+				const maxLen = 4095 // TTS API can do max 4096 characters
 				n := 1
 				for len(extracted.Text) > 0 {
 					chunkLen := len(extracted.Text)
@@ -111,7 +109,7 @@ var (
 					chunk := extracted.Text[:chunkLen]
 					extracted.Text = extracted.Text[chunkLen:]
 
-					c := fmt.Sprintf("Calling OpenAI TTS API go get audio for '%s' (chunk %d)", extracted.Title, n)
+					c := fmt.Sprintf("Calling OpenAI TTS API to get audio for '%s' (chunk %d)", extracted.Title, n)
 					_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
 					if err != nil {
 						doError(err)
@@ -119,7 +117,7 @@ var (
 					}
 
 					body := callOpenAI(chunk)
-					_, err = io.Copy(file, body)
+					_, err = io.Copy(tempFile, body)
 					if err != nil {
 						doError(err)
 						return
@@ -128,9 +126,18 @@ var (
 					n++
 				}
 
-				// todo c should be a link to download the file, which means we also need to operate a webserver...
-				c := "Done!"
-				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
+				_, err = tempFile.Seek(0, 0)
+				if err != nil {
+					doError(err)
+					return
+				}
+				url, uerr := uploadToS3(tempFile)
+				if uerr != nil {
+					doError(uerr)
+					return
+				}
+
+				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &url})
 				if err != nil {
 					doError(err)
 					return
@@ -192,7 +199,10 @@ func callOpenAI(text string) io.ReadCloser {
 	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/audio/speech", strings.NewReader(string(reqBody)))
 	req.Header.Add("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
 	req.Header.Add("Content-Type", "application/json")
+	fmt.Println("Calling OpenAI TTS API with len(text) =", len(text))
+	start := time.Now()
 	resp, _ := client.Do(req)
+	fmt.Println("OpenAI TTS API call took", time.Since(start))
 	return resp.Body
 }
 
@@ -203,4 +213,32 @@ func callExtractorAPI(url string) ExtractorResponse {
 	var extractorResponse ExtractorResponse
 	json.Unmarshal(body, &extractorResponse)
 	return extractorResponse
+}
+
+func uploadToS3(f *os.File) (string, error) {
+	sess, err := session.NewSession(&aws.Config{Region: aws.String("us-east-1")})
+	if err != nil {
+		return "", err
+	}
+	uploader := s3manager.NewUploader(sess)
+	randomBytes := make([]byte, 4) // 4 bytes * 2 for hex encoding = 8 characters
+	_, err = rand.Read(randomBytes)
+	if err != nil {
+		return "", err
+	}
+	randomString := hex.EncodeToString(randomBytes)
+	fileName := time.Now().Format("2006-01-02") + "_" + randomString + ".mp3"
+	fmt.Println("Uploading to S3 as", fileName)
+	start := time.Now()
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String("op1fun"),
+		Key:    aws.String("speecher/" + fileName),
+		Body:   f,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload file, %v", err)
+	}
+	fmt.Println("Upload to S3 took", time.Since(start))
+	url := "https://op1fun.s3.us-east-1.amazonaws.com/speecher/" + fileName
+	return url, nil
 }
