@@ -11,4 +11,12 @@ AWS_REGION
 DISCORD_TOKEN
 OPENAI_API_KEY
 EXTRACTOR_API_KEY
+S3_BUCKET
 ```
+
+## External Services
+
+- ExtractorAPI account https://extractorapi.com/
+- AWS account with S3 bucket, and IAM user with access to that bucket
+- Discord bot account https://discord.com/developers/applications
+- OpenAI account https://platform.openai.com/
