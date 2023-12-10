@@ -9,8 +9,11 @@ require (
 )
 
 require (
+	github.com/dmulholland/mp3lib v0.0.0-20190407131416-50ad4bfbe332 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/hyacinthus/mp3join v0.0.0-20190710105654-d46eaeeb9552 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	golang.org/x/crypto v0.0.0-20220926161630-eccd6366d1be // indirect
+	golang.org/x/sync v0.5.0 // indirect
 	golang.org/x/sys v0.0.0-20220928140112-f11e5e49a4ec // indirect
 )

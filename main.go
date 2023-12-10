@@ -9,7 +9,11 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/bwmarrin/discordgo"
+	"github.com/hyacinthus/mp3join"
+	"golang.org/x/sync/errgroup"
 	"io"
+	"sync"
+
 	"log"
 	"net/http"
 	"os"
@@ -32,8 +36,7 @@ type OpenAIRequest struct {
 const commandName = "speak"
 
 var (
-	s *discordgo.Session
-
+	s        *discordgo.Session
 	commands = []*discordgo.ApplicationCommand{
 		{
 			Name:        commandName,
@@ -87,79 +90,43 @@ var (
 					},
 				})
 				if err != nil {
-					doError(err)
+					fmt.Printf("error: %+v\n", err)
 					return
 				}
-				extracted := callExtractorAPI(option.StringValue())
-				preview := extracted.Text
-				if len(preview) > 100 {
-					preview = preview[:100]
-				}
-				fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
-
-				tempFile, err := os.CreateTemp("", "speech_*.mp3")
+				extracted, err := callExtractorAPI(option.StringValue())
 				if err != nil {
 					doError(err)
 					return
 				}
-				defer tempFile.Close()
 
-				const maxLen = 4095 // TTS API can do max 4096 characters
-				n := 1
-				for len(extracted.Text) > 0 {
-					chunkLen := len(extracted.Text)
-					if chunkLen > maxLen {
-						chunkLen = maxLen
-						// Find the last period in the current chunk
-						for i := chunkLen; i >= 0; i-- {
-							if extracted.Text[i] == '.' {
-								chunkLen = i + 1
-								break
-							}
-						}
-					}
-
-					chunk := extracted.Text[:chunkLen]
-					extracted.Text = extracted.Text[chunkLen:]
-
-					c := fmt.Sprintf("Calling OpenAI TTS API to get audio for '%s' (chunk %d)", extracted.Title, n)
-					_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
-					if err != nil {
-						doError(err)
-						return
-					}
-
-					voice := "alloy"
-					if v, ok := optionMap["voice"]; ok {
-						voice = v.StringValue()
-					}
-
-					body := callOpenAI(chunk, voice)
-					_, err = io.Copy(tempFile, body)
-					if err != nil {
-						doError(err)
-						return
-					}
-					_ = body.Close()
-					n++
+				chunks := textChunks(extracted.Text, 4095)
+				c := fmt.Sprintf("Calling OpenAI TTS API to get audio for '%s' (%d chunks)", extracted.Title, len(chunks))
+				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
+				if err != nil {
+					fmt.Printf("error: %+v\n", err)
+					return
 				}
 
-				_, err = tempFile.Seek(0, 0)
+				voice := "alloy"
+				if v, ok := optionMap["voice"]; ok {
+					voice = v.StringValue()
+				}
+				dest, err := getAudioForChunks(chunks, voice)
 				if err != nil {
 					doError(err)
 					return
 				}
-				mp3Url, uerr := uploadToS3(tempFile)
+
+				mp3Url, uerr := uploadToS3(dest)
 				if uerr != nil {
 					doError(uerr)
 					return
 				}
 
 				finalMessage := fmt.Sprintf("Here's the audio for '%s' (%s)\n\n%s", extracted.Title, url, mp3Url)
-
 				_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &finalMessage})
 				if err != nil {
-					doError(err)
+					fmt.Printf("error: %+v\n", err)
 					return
 				}
 			}
@@ -209,13 +176,73 @@ func main() {
 	<-stop
 }
 
-func callOpenAI(text, voice string) io.ReadCloser {
+func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
+	lock := sync.Mutex{}
+	tempFiles := make([]*os.File, len(chunks))
+	var g errgroup.Group
+	for ii, chunk := range chunks {
+		ii, chunk := ii, chunk // https://golang.org/doc/faq#closures_and_goroutines
+		g.Go(func() error {
+			body := getAudioForChunk(chunk, voice)
+			tempFile, err := os.CreateTemp("", "speech_*.mp3")
+			if err != nil {
+				return err
+			}
+			start := time.Now()
+			_, err = io.Copy(tempFile, body)
+			if err != nil {
+				return err
+			}
+			_ = body.Close()
+			lock.Lock()
+			tempFiles[ii] = tempFile
+			lock.Unlock()
+			fmt.Println("Writing to temp file took", time.Since(start))
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	joiner := mp3join.New()
+	for _, tempFile := range tempFiles {
+		_, err := tempFile.Seek(0, 0)
+		if err != nil {
+			return nil, err
+		}
+		err = joiner.Append(tempFile)
+		defer tempFile.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return joiner.Reader(), nil
+}
+
+func textChunks(input string, chunkSize int) []string {
+	var chunks []string
+	for len(input) > 0 {
+		chunkLen := len(input)
+		if chunkLen > chunkSize {
+			chunkLen = chunkSize
+			// Find the last period in the current chunk
+			for i := chunkLen; i >= 0; i-- {
+				if input[i] == '.' {
+					chunkLen = i + 1
+					break
+				}
+			}
+		}
+		chunk := input[:chunkLen]
+		input = input[chunkLen:]
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func getAudioForChunk(text, voice string) io.ReadCloser {
 	client := &http.Client{}
-	reqBody, _ := json.Marshal(OpenAIRequest{
-		Model: "tts-1",
-		Input: text,
-		Voice: voice,
-	})
+	reqBody, _ := json.Marshal(OpenAIRequest{Model: "tts-1", Input: text, Voice: voice})
 	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/audio/speech", strings.NewReader(string(reqBody)))
 	req.Header.Add("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
 	req.Header.Add("Content-Type", "application/json")
@@ -226,16 +253,30 @@ func callOpenAI(text, voice string) io.ReadCloser {
 	return resp.Body
 }
 
-func callExtractorAPI(url string) ExtractorResponse {
+func callExtractorAPI(url string) (ExtractorResponse, error) {
 	apiKey := os.Getenv("EXTRACTOR_API_KEY")
-	resp, _ := http.Get("https://extractorapi.com/api/v1/extractor/?apikey=" + apiKey + "&url=" + url)
-	body, _ := io.ReadAll(resp.Body)
+	resp, err := http.Get("https://extractorapi.com/api/v1/extractor/?apikey=" + apiKey + "&url=" + url)
+	if err != nil {
+		return ExtractorResponse{}, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ExtractorResponse{}, err
+	}
 	var extractorResponse ExtractorResponse
-	json.Unmarshal(body, &extractorResponse)
-	return extractorResponse
+	err = json.Unmarshal(body, &extractorResponse)
+	if err != nil {
+		return ExtractorResponse{}, err
+	}
+	preview := extractorResponse.Text
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
+	return extractorResponse, nil
 }
 
-func uploadToS3(f *os.File) (string, error) {
+func uploadToS3(f io.Reader) (string, error) {
 	sess, err := session.NewSession(&aws.Config{Region: aws.String("us-east-1")})
 	if err != nil {
 		return "", err
@@ -259,6 +300,5 @@ func uploadToS3(f *os.File) (string, error) {
 		return "", fmt.Errorf("failed to upload file, %v", err)
 	}
 	fmt.Println("Upload to S3 took", time.Since(start))
-	url := "https://op1fun.s3.us-east-1.amazonaws.com/speecher/" + fileName
-	return url, nil
+	return "https://op1fun.s3.us-east-1.amazonaws.com/speecher/" + fileName, nil
 }
