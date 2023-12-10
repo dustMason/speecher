@@ -13,6 +13,7 @@ primary_region = "lax"
 [env]
   PORT = "8080"
   AWS_REGION = "us-east-1"
+  S3_BUCKET = "op1fun"
 
 [http_service]
   internal_port = 8080

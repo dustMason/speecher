@@ -273,7 +273,7 @@ func callExtractorAPI(url string) (ExtractorResponse, error) {
 }
 
 func uploadToS3(f io.Reader, title, voice string) (string, error) {
-	sess, err := session.NewSession(&aws.Config{Region: aws.String("us-east-1")})
+	sess, err := session.NewSession(&aws.Config{Region: aws.String(os.Getenv("AWS_REGION"))})
 	if err != nil {
 		return "", err
 	}
@@ -291,7 +291,7 @@ func uploadToS3(f io.Reader, title, voice string) (string, error) {
 	fmt.Println("Uploading to S3 as", fileName)
 	start := time.Now()
 	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String("op1fun"),
+		Bucket: aws.String(os.Getenv("S3_BUCKET")),
 		Key:    aws.String("speecher/" + fileName),
 		Body:   f,
 	})
@@ -299,5 +299,5 @@ func uploadToS3(f io.Reader, title, voice string) (string, error) {
 		return "", fmt.Errorf("failed to upload file, %v", err)
 	}
 	fmt.Println("Upload to S3 took", time.Since(start))
-	return "https://op1fun.s3.us-east-1.amazonaws.com/speecher/" + fileName, nil
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/speecher/%s", os.Getenv("S3_BUCKET"), os.Getenv("AWS_REGION"), fileName), nil
 }
