@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
@@ -12,6 +10,8 @@ import (
 	"github.com/hyacinthus/mp3join"
 	"golang.org/x/sync/errgroup"
 	"io"
+	"math/rand"
+	"regexp"
 	"sync"
 
 	"log"
@@ -111,13 +111,13 @@ var (
 				if v, ok := optionMap["voice"]; ok {
 					voice = v.StringValue()
 				}
-				dest, err := getAudioForChunks(chunks, voice)
+				r, err := getAudioForChunks(chunks, voice)
 				if err != nil {
 					doError(err)
 					return
 				}
 
-				mp3Url, uerr := uploadToS3(dest)
+				mp3Url, uerr := uploadToS3(r, extracted.Title, voice)
 				if uerr != nil {
 					doError(uerr)
 					return
@@ -156,9 +156,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Cannot open the session: %v", err)
 	}
-
 	guildID := os.Getenv("GUILD_ID")
-
 	registeredCommands := make([]*discordgo.ApplicationCommand, len(commands))
 	for i, v := range commands {
 		cmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, v)
@@ -167,9 +165,7 @@ func main() {
 		}
 		registeredCommands[i] = cmd
 	}
-
 	defer s.Close()
-
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	log.Println("Press Ctrl+C to exit")
@@ -249,7 +245,7 @@ func getAudioForChunk(text, voice string) io.ReadCloser {
 	fmt.Println("Calling OpenAI TTS API with len(text) =", len(text))
 	start := time.Now()
 	resp, _ := client.Do(req)
-	fmt.Println("OpenAI TTS API call took", time.Since(start))
+	fmt.Println("Streaming response from OpenAI after", time.Since(start))
 	return resp.Body
 }
 
@@ -276,19 +272,22 @@ func callExtractorAPI(url string) (ExtractorResponse, error) {
 	return extractorResponse, nil
 }
 
-func uploadToS3(f io.Reader) (string, error) {
+func uploadToS3(f io.Reader, title, voice string) (string, error) {
 	sess, err := session.NewSession(&aws.Config{Region: aws.String("us-east-1")})
 	if err != nil {
 		return "", err
 	}
 	uploader := s3manager.NewUploader(sess)
-	randomBytes := make([]byte, 4) // 4 bytes * 2 for hex encoding = 8 characters
-	_, err = rand.Read(randomBytes)
+	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
 	if err != nil {
 		return "", err
 	}
-	randomString := hex.EncodeToString(randomBytes)
-	fileName := time.Now().Format("2006-01-02") + "_" + randomString + ".mp3"
+	safeTitle := reg.ReplaceAllString(title, "-")
+	if len(safeTitle) > 42 {
+		safeTitle = safeTitle[:42]
+	}
+	r := rand.Intn(9000) + 1000
+	fileName := fmt.Sprintf("%s-%s-%s-%04d.mp3", time.Now().Format("2006-01-02"), safeTitle, voice, r)
 	fmt.Println("Uploading to S3 as", fileName)
 	start := time.Now()
 	_, err = uploader.Upload(&s3manager.UploadInput{
