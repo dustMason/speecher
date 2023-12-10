@@ -45,8 +45,21 @@ var (
 					Description: "URL to read",
 					Required:    true,
 				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "voice",
+					Description: "Voice to use",
+					Required:    false,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "Alloy (default)", Value: "alloy"},
+						{Name: "Echo", Value: "echo"},
+						{Name: "Fable", Value: "fable"},
+						{Name: "Onyx", Value: "onyx"},
+						{Name: "Nova", Value: "nova"},
+						{Name: "Shimmer", Value: "shimmer"},
+					},
+				},
 			},
-			// todo add option for voice
 		},
 	}
 
@@ -116,7 +129,12 @@ var (
 						return
 					}
 
-					body := callOpenAI(chunk)
+					voice := "alloy"
+					if v, ok := optionMap["voice"]; ok {
+						voice = v.StringValue()
+					}
+
+					body := callOpenAI(chunk, voice)
 					_, err = io.Copy(tempFile, body)
 					if err != nil {
 						doError(err)
@@ -191,12 +209,12 @@ func main() {
 	<-stop
 }
 
-func callOpenAI(text string) io.ReadCloser {
+func callOpenAI(text, voice string) io.ReadCloser {
 	client := &http.Client{}
 	reqBody, _ := json.Marshal(OpenAIRequest{
 		Model: "tts-1",
 		Input: text,
-		Voice: "alloy",
+		Voice: voice,
 	})
 	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/audio/speech", strings.NewReader(string(reqBody)))
 	req.Header.Add("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
