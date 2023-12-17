@@ -94,7 +94,6 @@ var (
 					fmt.Printf("error: %+v\n", err)
 					return
 				}
-				//extracted, err := callExtractorAPI(option.StringValue())
 				extracted, err := getContents(url)
 				if err != nil {
 					doError(err)
@@ -178,9 +177,14 @@ func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
 	lock := sync.Mutex{}
 	tempFiles := make([]*os.File, len(chunks))
 	var g errgroup.Group
+	sem := make(chan struct{}, 10) // create a buffered channel as semaphore
+
 	for ii, chunk := range chunks {
 		ii, chunk := ii, chunk // https://golang.org/doc/faq#closures_and_goroutines
+		sem <- struct{}{}      // block if there are already 10 goroutines running
 		g.Go(func() error {
+			defer func() { <-sem }() // read from the channel when goroutine finishes
+			fmt.Println("Starting chunk", ii)
 			body := getAudioForChunk(chunk, voice)
 			tempFile, err := os.CreateTemp("", "speech_*.mp3")
 			if err != nil {
@@ -195,12 +199,19 @@ func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
 			lock.Lock()
 			tempFiles[ii] = tempFile
 			lock.Unlock()
-			fmt.Println("Writing to temp file took", time.Since(start))
+			fmt.Println("Writing to temp file took", time.Since(start), "chunk", ii)
 			return nil
 		})
 	}
+
+	// wait for all goroutines to finish
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	// drain the semaphore channel
+	for len(sem) > 0 {
+		<-sem
 	}
 	joiner := mp3join.New()
 	for _, tempFile := range tempFiles {
@@ -251,39 +262,18 @@ func getAudioForChunk(text, voice string) io.ReadCloser {
 	return resp.Body
 }
 
-func callExtractorAPI(url string) (ExtractorResponse, error) {
-	apiKey := os.Getenv("EXTRACTOR_API_KEY")
-	resp, err := http.Get("https://extractorapi.com/api/v1/extractor/?apikey=" + apiKey + "&url=" + url)
-	if err != nil {
-		return ExtractorResponse{}, err
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ExtractorResponse{}, err
-	}
-	var extractorResponse ExtractorResponse
-	err = json.Unmarshal(body, &extractorResponse)
-	if err != nil {
-		return ExtractorResponse{}, err
-	}
-	preview := extractorResponse.Text
-	if len(preview) > 100 {
-		preview = preview[:100]
-	}
-	fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
-	return extractorResponse, nil
-}
-
 func getContents(url string) (ExtractorResponse, error) {
 	var extractorResponse ExtractorResponse
 	article, err := readability.FromURL(url, 30*time.Second)
 	if err != nil {
 		return extractorResponse, err
 	}
-	return ExtractorResponse{
-		Title: article.Title,
-		Text:  article.TextContent,
-	}, nil
+	preview := article.TextContent
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
+	return ExtractorResponse{Title: article.Title, Text: article.TextContent}, nil
 }
 
 func uploadToS3(f io.Reader, title, voice string) (string, error) {
