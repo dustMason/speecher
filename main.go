@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/bwmarrin/discordgo"
+	"github.com/go-shiori/go-readability"
 	"github.com/hyacinthus/mp3join"
 	"golang.org/x/sync/errgroup"
 	"io"
@@ -93,7 +94,8 @@ var (
 					fmt.Printf("error: %+v\n", err)
 					return
 				}
-				extracted, err := callExtractorAPI(option.StringValue())
+				//extracted, err := callExtractorAPI(option.StringValue())
+				extracted, err := getContents(url)
 				if err != nil {
 					doError(err)
 					return
@@ -270,6 +272,18 @@ func callExtractorAPI(url string) (ExtractorResponse, error) {
 	}
 	fmt.Printf("Extracted text (first 100 characters): %s\n", preview)
 	return extractorResponse, nil
+}
+
+func getContents(url string) (ExtractorResponse, error) {
+	var extractorResponse ExtractorResponse
+	article, err := readability.FromURL(url, 30*time.Second)
+	if err != nil {
+		return extractorResponse, err
+	}
+	return ExtractorResponse{
+		Title: article.Title,
+		Text:  article.TextContent,
+	}, nil
 }
 
 func uploadToS3(f io.Reader, title, voice string) (string, error) {
