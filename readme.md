@@ -1,6 +1,6 @@
 # speecher
 
-A discord bot that glues together ExtractorAPI and OpenAI TTS.
+A discord bot that reads webpages using OpenAI TTS.
 
 It registers the `/speak` command with discord, which takes a `url` and optional `voice`. It then uses `go-readability` to extract the text from the url, and sends it to OpenAI TTS to generate an audio file. The audio file is then uploaded to S3, and the link is sent back to the user.
 
