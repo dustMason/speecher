@@ -34,6 +34,12 @@ type OpenAIRequest struct {
 	Voice string `json:"voice"`
 }
 
+type Event int
+
+const (
+	Loading Event = iota
+	Done
+)
 const commandName = "speak"
 
 var (
@@ -112,7 +118,27 @@ var (
 				if v, ok := optionMap["voice"]; ok {
 					voice = v.StringValue()
 				}
-				r, err := getAudioForChunks(chunks, voice)
+
+				chunksProgress := make([]string, len(chunks))
+				for i := range chunksProgress {
+					chunksProgress[i] = "◻️"
+				}
+				chunksLock := sync.Mutex{}
+				r, err := getAudioForChunks(chunks, voice, func(chunkIndex int, event Event) {
+					chunksLock.Lock()
+					if event == Loading {
+						chunksProgress[chunkIndex] = "🔵"
+					} else if event == Done {
+						chunksProgress[chunkIndex] = "✅"
+					}
+					c := "Progress: " + strings.Join(chunksProgress, "")
+					chunksLock.Unlock()
+					_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &c})
+					if err != nil {
+						fmt.Printf("error: %+v\n", err)
+						return
+					}
+				})
 				if err != nil {
 					doError(err)
 					return
@@ -173,7 +199,7 @@ func main() {
 	<-stop
 }
 
-func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
+func getAudioForChunks(chunks []string, voice string, callback func(int, Event)) (io.Reader, error) {
 	lock := sync.Mutex{}
 	tempFiles := make([]*os.File, len(chunks))
 	var g errgroup.Group
@@ -185,6 +211,7 @@ func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
 		g.Go(func() error {
 			defer func() { <-sem }() // read from the channel when goroutine finishes
 			fmt.Println("Starting chunk", ii)
+			callback(ii, Loading)
 			body := getAudioForChunk(chunk, voice)
 			tempFile, err := os.CreateTemp("", "speech_*.mp3")
 			if err != nil {
@@ -200,6 +227,7 @@ func getAudioForChunks(chunks []string, voice string) (io.Reader, error) {
 			tempFiles[ii] = tempFile
 			lock.Unlock()
 			fmt.Println("Writing to temp file took", time.Since(start), "chunk", ii)
+			callback(ii, Done)
 			return nil
 		})
 	}
